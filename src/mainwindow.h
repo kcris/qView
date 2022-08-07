@@ -167,4 +167,29 @@ private:
     QFutureWatcher<QList<OpenWith::OpenWithItem>> openWithFutureWatcher;
 };
 
+
+
+class ThumbnailLoader : public QObject
+                      , public QRunnable
+{
+    Q_OBJECT
+public:
+    ThumbnailLoader(QDir dir, QObject *parent = 0)
+        : QObject(parent)
+        , m_dir{dir}
+    {
+    }
+
+signals:
+    void loadOk(QString filename, QImage icon);
+    void loadFailed(QString filename, QString what);
+
+public slots:
+    void run();
+
+private:
+    QDir m_dir;
+};
+
+
 #endif // MAINWINDOW_H

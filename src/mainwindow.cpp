@@ -32,6 +32,84 @@
 #include <QNetworkRequest>
 #include <QNetworkReply>
 #include <QTemporaryFile>
+#include <QFileSystemModel>
+#include <QIcon>
+#include <QImage>
+
+//
+// thumbnails ideas
+//
+// https://github.com/oferkv/phototonic
+//
+
+static const int THUMBNAIL_WIDTH = 200;
+static const int THUMBNAIL_HEIGHT = 150;
+
+static const int itemRoleFilepath = Qt::UserRole + 1;
+
+static const QStringList fileFilterImages = {"*.jpg", "*.jpeg"};
+
+// for the explanation of the trick, check out:
+// http://www.virtualdub.org/blog/pivot/entry.php?id=116
+// http://www.compuphase.com/graphic/scale3.htm
+#define AVG(a,b)  ( ((((a)^(b)) & 0xfefefefeUL) >> 1) + ((a)&(b)) )
+
+// assume that the source image is ARGB32 formatted
+static QImage cheatScaled(int width, int height, const QImage &source)
+{
+    Q_ASSERT(source.format() == QImage::Format_ARGB32);
+
+    QImage dest(width, height, QImage::Format_ARGB32);
+
+    int sw = source.width();
+    int sh = source.height();
+    int xs = (sw << 8) / width;
+    int ys = (sh << 8) / height;
+    quint32 *dst = reinterpret_cast<quint32*>(dest.bits());
+    int stride = dest.bytesPerLine() >> 2;
+
+    for (int y = 0, yi = ys >> 2; y < height; ++y, yi += ys, dst += stride) {
+        const quint32 *src1 = reinterpret_cast<const quint32*>(source.scanLine(yi >> 8));
+        const quint32 *src2 = reinterpret_cast<const quint32*>(source.scanLine((yi + ys / 2) >> 8));
+        for (int x = 0, xi1 = xs / 4, xi2 = xs * 3 / 4; x < width; ++x, xi1 += xs, xi2 += xs) {
+            quint32 pixel1 = AVG(src1[xi1 >> 8], src1[xi2 >> 8]);
+            quint32 pixel2 = AVG(src2[xi1 >> 8], src2[xi2 >> 8]);
+            dst[x] = AVG(pixel1, pixel2);
+        }
+    }
+
+    return dest;
+}
+
+void ThumbnailLoader::run()
+{
+    static const QString strFailed = "n/a";
+    //static const QIcon iconFailed;
+
+    QStringList imageFiles = m_dir.entryList(fileFilterImages, QDir::Files);
+
+    for(QString filename : imageFiles) //load might be slow if we have lots of files
+    {
+        QString filePath = m_dir.filePath(filename);
+
+        QImage image{filePath}; //loads image file
+        if (image.isNull())
+            emit loadFailed(filename, strFailed);
+
+        //scaling reduces cpu+memory a LOT. Image quality is also reduced but that's ok for a thumbnail
+        //https://www.qt.io/blog/2009/01/26/creating-thumbnail-preview
+        //https://code.qt.io/cgit/%7Bnon-gerrit%7D/qt-labs/graphics-dojo.git/tree/thumbview/thumbview.cpp
+
+//        QImage scaled = image
+//                .scaled(400, 300, Qt::IgnoreAspectRatio, Qt::FastTransformation)
+//                .scaled(THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT, Qt::IgnoreAspectRatio, Qt::SmoothTransformation)
+//                ;
+
+        QImage scaled = cheatScaled(THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT, image.convertToFormat(QImage::Format_ARGB32));
+
+        emit loadOk(filePath, scaled);
+    }
+}
 
 MainWindow::MainWindow(QWidget *parent) :
     QMainWindow(parent),
@@ -46,10 +124,79 @@ MainWindow::MainWindow(QWidget *parent) :
 
     // Initialize graphicsview
     graphicsView = new QVGraphicsView(this);
-    centralWidget()->layout()->addWidget(graphicsView);
+    //centralWidget()->layout()->addWidget(graphicsView);
+    ui->splitter2->addWidget(graphicsView);
 
     // Hide fullscreen label by default
     ui->fullscreenLabel->hide();
+
+    //folders view
+    QFileSystemModel* fsModel = new QFileSystemModel();
+    fsModel->setReadOnly(true);
+    fsModel->setFilter(QDir::AllDirs | QDir::AllEntries /*| QDir::NoDotAndDotDot*/);
+    fsModel->setRootPath(fsModel->myComputer().toString());
+    fsModel->setNameFilters(fileFilterImages);
+    ui->listViewFiles->setModel(fsModel);
+    connect(ui->listViewFiles, &QListView::activated, [fsModel, this](const QModelIndex &index) {
+
+        if (fsModel->isDir(index))
+        {
+            //auto-refresh the folders view
+            QString path = fsModel->filePath(index);
+            QModelIndex newIndex = fsModel->index(path);
+            ui->listViewFiles->setRootIndex(newIndex);
+
+            //auto-refresh the thumbnails view
+            ui->listWidgetThumbnails->clear();
+
+            ThumbnailLoader* loader = new ThumbnailLoader(path);
+            connect(loader, &ThumbnailLoader::loadOk, this, [this](QString filePath, QImage image) {
+                QString fileName = QFileInfo(filePath).fileName();
+                QListWidgetItem* item = new QListWidgetItem(fileName);
+                item->setData(Qt::DecorationRole, QPixmap::fromImage(image));
+                item->setData(itemRoleFilepath, filePath);
+                ui->listWidgetThumbnails->addItem(item);
+            }, Qt::QueuedConnection);
+            QThreadPool::globalInstance()->start(loader); //load on a separate thread
+        }
+    });
+    connect(ui->listViewFiles->selectionModel(), &QItemSelectionModel::selectionChanged,
+            [fsModel, this](const QItemSelection &selected, const QItemSelection &) {
+
+        //selected path in the folders view
+        QModelIndex index = selected.indexes().first();
+        if (fsModel->isDir(index))
+            return;
+        QString path = fsModel->filePath(index);
+
+        //find it in the thumbnails view
+        QAbstractItemModel * thModel = ui->listWidgetThumbnails->model();
+        QModelIndexList thIndices = thModel->match(thModel->index(0,0), itemRoleFilepath, path);
+        if (!thIndices.empty())
+        {
+            QModelIndex thIndex = thIndices.first();
+            QListWidgetItem* thItem = ui->listWidgetThumbnails->item(thIndex.row());
+            if (thItem)
+                ui->listWidgetThumbnails->setCurrentItem(thItem);
+        }
+    });
+
+    //thumbnails view
+    ui->listWidgetThumbnails->setViewMode(QListWidget::IconMode);
+    ui->listWidgetThumbnails->setIconSize(QSize(200,200));
+    ui->listWidgetThumbnails->setResizeMode(QListWidget::Adjust);
+    connect(ui->listWidgetThumbnails, &QListWidget::currentItemChanged, [this](QListWidgetItem *current, QListWidgetItem *){
+        //auto-refresh the imageview
+        graphicsView->closeImage();
+        if (!current)
+            return;
+        QVariant d = current->data(itemRoleFilepath);
+        if (!d.isValid())
+            return;
+        QString filePath = d.toString();
+        graphicsView->loadFile(filePath);
+    });
+    //TODOCHRIS: update selection in folders view when clicking on thumbnail??
 
     // Connect graphicsview signals
     connect(graphicsView, &QVGraphicsView::fileChanged, this, &MainWindow::fileChanged);

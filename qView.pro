@@ -22,6 +22,9 @@ CONFIG -= debug_and_release debug_and_release_target
 # enable c++14
 CONFIG += c++14
 
+#chris - todo: thumbnails support - https://forum.qt.io/topic/90759/qt-thumbnails-dyamically/10
+CONFIG += NO_WIN32
+
 # Print if this is a debug or release build
 CONFIG(debug, debug|release) {
     message("This is a debug build")
@@ -42,6 +45,7 @@ win32 {
 
     # To build without win32: qmake CONFIG+=NO_WIN32
     !CONFIG(NO_WIN32) {
+
         LIBS += -lshell32 -luser32 -lole32 -lshlwapi
         DEFINES += WIN32_LOADED
         message("Linked to win32 api")
